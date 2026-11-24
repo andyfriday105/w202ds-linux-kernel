@@ -112,20 +112,30 @@ jobs:
         run: |
           set -e
           KO="output/kernel-${{ inputs.profile }}"
-          mkdir -p dist
+          mkdir -p dist/modules
           cp "$KO/arch/arm64/boot/Image" dist/Image
           cp "$KO/.config" dist/kernel.config
           if [ -f "$KO/System.map" ]; then cp "$KO/System.map" dist/; fi
           if [ -f output/devicetree/w202ds-server.dtb ]; then
             cp output/devicetree/w202ds-server.dtb dist/
           fi
-          find "$KO" -name '*.ko' -print0 2>/dev/null \
-            | xargs -0 -r -I{} cp {} dist/ 2>/dev/null || true
-          ( cd dist && sha256sum * > SHA256SUMS )
-          echo "--- dist ---"
-          ls -lh dist
-          echo "ko count: $(ls dist/*.ko 2>/dev/null | wc -l)"
-
+          # Preserve the module directory tree so case-variant names
+          # (e.g. xt_DSCP.ko vs xt_dscp.ko) do NOT collide in the artifact.
+          rsync -a --prune-empty-dirs --include='*/' --include='*.ko' --exclude='*' "$KO/" dist/modules/ || true
+          echo "--- dist tree ---"
+          find dist -type f | sort
+          echo "ko count: $(find dist -name '*.ko' | wc -l)"
+          echo "--- case-insensitive duplicate .ko basenames ---"
+          dup=$(find dist -name '*.ko' -printf '%f\n' | tr 'A-Z' 'a-z' | sort | uniq -d)
+          if [ -n "$dup" ]; then
+            for d in $dup; do
+              echo "DUP: $d"
+              find dist -name '*.ko' | awk -v b="$d" 'tolower($0) ~ ("/" b "$")'
+            done
+          else
+            echo "(none)"
+          fi
+          ( cd dist && find . -type f ! -name SHA256SUMS -print0 | xargs -0 sha256sum > SHA256SUMS )
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
