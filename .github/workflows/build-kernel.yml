@@ -112,30 +112,29 @@ jobs:
         run: |
           set -e
           KO="output/kernel-${{ inputs.profile }}"
-          mkdir -p dist/modules
+          rm -rf dist modtree
+          mkdir -p dist modtree
           cp "$KO/arch/arm64/boot/Image" dist/Image
           cp "$KO/.config" dist/kernel.config
           if [ -f "$KO/System.map" ]; then cp "$KO/System.map" dist/; fi
-          if [ -f output/devicetree/w202ds-server.dtb ]; then
-            cp output/devicetree/w202ds-server.dtb dist/
-          fi
-          # Preserve the module directory tree so case-variant names
-          # (e.g. xt_DSCP.ko vs xt_dscp.ko) do NOT collide in the artifact.
-          rsync -a --prune-empty-dirs --include='*/' --include='*.ko' --exclude='*' "$KO/" dist/modules/ || true
-          echo "--- dist tree ---"
-          find dist -type f | sort
-          echo "ko count: $(find dist -name '*.ko' | wc -l)"
-          echo "--- case-insensitive duplicate .ko basenames ---"
-          dup=$(find dist -name '*.ko' -printf '%f\n' | tr 'A-Z' 'a-z' | sort | uniq -d)
-          if [ -n "$dup" ]; then
-            for d in $dup; do
-              echo "DUP: $d"
-              find dist -name '*.ko' | awk -v b="$d" 'tolower($0) ~ ("/" b "$")'
-            done
-          else
-            echo "(none)"
-          fi
+          if [ -f output/devicetree/w202ds-server.dtb ]; then cp output/devicetree/w202ds-server.dtb dist/; fi
+          # module metadata (for depmod/deployment) if present
+          for mf in modules.order modules.dep modules.alias modules.builtin modules.softdep; do
+            [ -f "$KO/$mf" ] && cp "$KO/$mf" dist/ || true
+          done
+          # collect ALL .ko preserving directory tree
+          rsync -a --prune-empty-dirs --include='*/' --include='*.ko' --exclude='*' "$KO/" modtree/ || true
+          # ship as a single case-preserving tarball (GitHub artifact store is
+          # case-insensitive, so loose xt_DSCP.ko vs xt_dscp.ko would collide)
+          tar -C modtree -czf dist/modules.tar.gz .
+          tar -tzf dist/modules.tar.gz | grep -E "\.ko$" | sort > dist/modules.list
+          echo "ko count: $(wc -l < dist/modules.list)"
+          echo "--- case-variant modules (both preserved inside modules.tar.gz) ---"
+          grep -iE "xt_(dscp|hl|rateest|tcpmss)\.ko$" dist/modules.list | sort || true
+          rm -rf modtree
           ( cd dist && find . -type f ! -name SHA256SUMS -print0 | xargs -0 sha256sum > SHA256SUMS )
+          echo "--- dist ---"
+          ls -lh dist
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
