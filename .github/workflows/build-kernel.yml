@@ -46,12 +46,9 @@ jobs:
             https://github.com/andyfriday105/w202ds-linux-kernel.git kernel
           echo "--- 布局校验 ---"
           ls -1
-          echo "--- pj4edk-boot-display 链接 ---"
           readlink kernel/drivers/firmware/pj4edk-boot-display
           test -e kernel/drivers/firmware/pj4edk-boot-display/Kconfig && echo "链接可解析: OK"
-          echo "--- kernel 仓库标识 ---"
           git -C kernel rev-parse HEAD
-          git -C kernel status --porcelain | head -5 || true
 
       - name: Build kernel and modules
         working-directory: ${{ github.workspace }}/src/6.18.35
@@ -64,6 +61,39 @@ jobs:
             --kernel-out "output/kernel-${{ inputs.profile }}" \
             --jobs "${{ inputs.jobs }}" \
             all 2>&1 | tail -n 400
+
+      # 失败时把 Kbuild 的完整日志打出来，避免只看到一行摘要。
+      - name: Dump build logs on failure
+        if: failure()
+        working-directory: ${{ github.workspace }}/src/6.18.35
+        run: |
+          KOUT="output/kernel-${{ inputs.profile }}"
+          for f in "$KOUT/build.log" "$KOUT/configure.log"; do
+            echo "########## $f ##########"
+            if [ -f "$f" ]; then
+              echo "(总行数: $(wc -l < "$f"))"
+              grep -n -i -m 40 -E "error|Error [0-9]|No such|cannot|not found|undefined|fatal" "$f" | head -60 || true
+              echo "---------- 尾部 120 行 ----------"
+              tail -n 120 "$f"
+            else
+              echo "(缺失)"
+            fi
+            echo
+          done
+          echo "########## kernel-build.json ##########"
+          [ -f "$KOUT/kernel-build.json" ] && cat "$KOUT/kernel-build.json" || echo "(缺失)"
+
+      - name: Upload build logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-${{ github.sha }}
+          path: |
+            ${{ github.workspace }}/src/6.18.35/output/kernel-*/build.log
+            ${{ github.workspace }}/src/6.18.35/output/kernel-*/configure.log
+            ${{ github.workspace }}/src/6.18.35/output/kernel-*/kernel-build.json
+          retention-days: 7
+          if-no-files-found: warn
 
       - name: Build DTB
         working-directory: ${{ github.workspace }}/src/6.18.35
