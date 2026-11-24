@@ -3,14 +3,10 @@ name: Build W202DS Kernel
 on:
   workflow_dispatch:
     inputs:
-      config_url:
-        description: "defconfig 来源（raw URL）"
+      profile:
+        description: "配置 profile（debug / desktop）"
         required: false
-        default: "https://raw.githubusercontent.com/Yeamika/w202ds-linux/6.18.35/config/server.config"
-      dts_url:
-        description: "板级 DTS 来源（raw URL）"
-        required: false
-        default: "https://raw.githubusercontent.com/Yeamika/w202ds-linux/6.18.35/devicetree/w202ds-server.dts"
+        default: "debug"
       jobs:
         description: "并行编译度"
         required: false
@@ -25,13 +21,6 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 355
     steps:
-      - name: Checkout kernel
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-          submodules: false
-          lfs: false
-
       - name: Install toolchain
         run: |
           sudo apt-get update
@@ -43,52 +32,60 @@ jobs:
           aarch64-linux-gnu-gcc --version | head -1
           df -h / | tail -1
 
-      - name: Fetch W202DS config
+      # kernel/ 里的符号链接按 ../../../Devices/... 解析，必须先还原主仓库布局，
+      # 再把 fork 的内核克隆成独立 git 仓库放到 kernel/（build.py 要求独立 checkout）。
+      - name: Fetch source tree
         run: |
-          curl -fsSL "${{ inputs.config_url }}" -o .config
-          echo "config bytes: $(wc -c < .config)"
-          grep -E '^(CONFIG_LOCALVERSION|CONFIG_SYSTEM_TRUSTED_KEYS)=' .config || true
+          SRC="$GITHUB_WORKSPACE/src/6.18.35"
+          mkdir -p "$SRC"
+          cd "$SRC"
+          git clone --depth 1 --branch 6.18.35 \
+            https://github.com/Yeamika/w202ds-linux.git .
+          rm -rf kernel
+          git clone --depth 1 --branch 6.18.35 \
+            https://github.com/andyfriday105/w202ds-linux-kernel.git kernel
+          echo "--- 布局校验 ---"
+          ls -1
+          echo "--- pj4edk-boot-display 链接 ---"
+          readlink kernel/drivers/firmware/pj4edk-boot-display
+          test -e kernel/drivers/firmware/pj4edk-boot-display/Kconfig && echo "链接可解析: OK"
+          echo "--- kernel 仓库标识 ---"
+          git -C kernel rev-parse HEAD
+          git -C kernel status --porcelain | head -5 || true
 
-      - name: Resolve config
+      - name: Build kernel and modules
+        working-directory: ${{ github.workspace }}/src/6.18.35
         env:
-          ARCH: arm64
-          CROSS_COMPILE: aarch64-linux-gnu-
-          LOCALVERSION:
-        run: |
-          make olddefconfig
-          echo "--- release ---"
-          make -s kernelrelease
-
-      - name: Build Image and modules
-        env:
-          ARCH: arm64
-          CROSS_COMPILE: aarch64-linux-gnu-
-          LOCALVERSION:
+          LOCALVERSION: ""
         run: |
           set -o pipefail
-          make -j"${{ inputs.jobs }}" Image modules 2>&1 | tail -n 200
+          python3 -B scripts/build.py \
+            --profile "${{ inputs.profile }}" \
+            --kernel-out "output/kernel-${{ inputs.profile }}" \
+            --jobs "${{ inputs.jobs }}" \
+            all 2>&1 | tail -n 400
 
       - name: Build DTB
+        working-directory: ${{ github.workspace }}/src/6.18.35
         run: |
-          mkdir -p out
-          curl -fsSL "${{ inputs.dts_url }}" -o out/w202ds-server.dts
-          # 先做预处理再 dtc，兼容 /include/ 与 cpp 宏
-          aarch64-linux-gnu-gcc -E -P -x assembler-with-cpp \
-            -I include -I arch/arm64/boot/dts \
-            out/w202ds-server.dts -o out/w202ds-server.pre.dts
-          dtc -I dts -O dtb -o out/w202ds-server.dtb out/w202ds-server.pre.dts
-          ls -lh out
+          mkdir -p output/devicetree
+          dtc -I dts -O dtb -o output/devicetree/w202ds-server.dtb \
+            devicetree/w202ds-server.dts
+          ls -lh output/devicetree
 
       - name: Package
+        working-directory: ${{ github.workspace }}/src/6.18.35
         run: |
           set -e
+          KO="output/kernel-${{ inputs.profile }}"
           mkdir -p dist
-          cp arch/arm64/boot/Image dist/Image
-          cp .config dist/kernel.config
-          [ -f System.map ] && cp System.map dist/
-          cp out/w202ds-server.dtb dist/ 2>/dev/null || true
-          # 树内模块
-          find . -name '*.ko' -not -path './dist/*' -print0 2>/dev/null \
+          cp "$KO/arch/arm64/boot/Image" dist/Image
+          cp "$KO/.config" dist/kernel.config
+          if [ -f "$KO/System.map" ]; then cp "$KO/System.map" dist/; fi
+          if [ -f output/devicetree/w202ds-server.dtb ]; then
+            cp output/devicetree/w202ds-server.dtb dist/
+          fi
+          find "$KO" -name '*.ko' -print0 2>/dev/null \
             | xargs -0 -r -I{} cp {} dist/ 2>/dev/null || true
           ( cd dist && sha256sum * > SHA256SUMS )
           echo "--- dist ---"
@@ -99,6 +96,17 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: w202ds-kernel-${{ github.sha }}
-          path: dist/
+          path: ${{ github.workspace }}/src/6.18.35/dist/
           retention-days: 14
           compression-level: 0
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### W202DS kernel build"
+            echo ""
+            echo "- profile: \`${{ inputs.profile }}\`"
+            echo "- jobs: \`${{ inputs.jobs }}\`"
+            echo "- commit: \`${{ github.sha }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
